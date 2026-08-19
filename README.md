@@ -7,14 +7,17 @@
 ## 用法
 
 ```bash
-# 自動下載官方 server jar 並提取
+# 自動下載官方 server jar 並提取（預設含繁體中文翻譯 name_zh_tw / display_name_zh_tw）
 python3 extract.py 1.26.2
 
 # 用本機 jar（vanilla / Paper / Canvas 任何 bundler 皆可）
 python3 extract.py 1.26.2 --jar ~/Downloads/paper-26.2-21.jar
 
-# 指定輸出目錄 / 保留中間檔
-python3 extract.py 1.26.2 -o ~/Desktop/dump --keep
+# 指定輸出目錄 / 保留中間檔 / 換語言（en_us、zh_cn、ja_jp...任一官方語系）
+python3 extract.py 1.26.2 -o ~/Desktop/dump --keep --lang zh_cn
+
+# 不需要翻譯欄位
+python3 extract.py 1.26.2 --no-lang
 
 # 查看 Mojang 可用版本
 python3 extract.py --list
@@ -35,6 +38,7 @@ python3 extract.py --list
   "id": "minecraft:stone_hoe",
   "protocol_id": 953,
   "translation_key": "item.minecraft.stone_hoe",
+  "name_zh_tw": "石鋤",
   "is_block": false,
   "max_stack_size": 1,
   "rarity": "common",
@@ -42,12 +46,16 @@ python3 extract.py --list
 }
 ```
 
+> 翻譯預設為繁體中文（`name_zh_tw`），可換成任一台版官方語系（`--lang`）。
+> 翻譯來源為官方 asset index 的 `minecraft/lang/<lang>.json`，與遊戲內顯示完全一致。
+
 ### creative-tabs.json — 原版創造模式（1.26.2 共 14 個 tab）
 
 ```json
 {
   "id": "minecraft:combat",
   "display_name": "Combat",
+  "display_name_zh_tw": "戰鬥",
   "type": "CATEGORY",
   "icon": "minecraft:netherite_sword",
   "items": ["minecraft:netherite_sword", "..."],

@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import urllib.request
+import zipfile
 
 MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 CACHE_DIR = pathlib.Path.home() / ".cache" / "mc-data-extractor"
@@ -68,6 +69,31 @@ def resolve_version(version):
             return ids[cand]
     latest = manifest.get("latest", {}).get("release", "?")
     raise SystemExit(f"版本 {version} 不在 Mojang manifest 中 (最新 release: {latest}; 可用 --list 查看)")
+
+
+def fetch_lang(vid, lang):
+    """從官方 asset index 取得語系檔 (+ en_us 備援), 回傳 [langPath, enPath]。"""
+    vmeta = http_json(resolve_version(vid)["url"])
+    ai = vmeta.get("assetIndex")
+    if not ai or "url" not in ai:
+        log("警告: 版本沒有 assetIndex, 跳過翻譯")
+        return []
+    idx = http_json(ai["url"])
+    out_dir = CACHE_DIR / vid / "lang"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for name in (f"minecraft/lang/{lang}.json", "minecraft/lang/en_us.json"):
+        obj = idx.get("objects", {}).get(name)
+        if not obj:
+            log(f"警告: asset index 內沒有 {name}")
+            continue
+        h = obj["hash"]
+        dest = out_dir / name.rsplit("/", 1)[-1]
+        if not dest.exists():
+            download(f"https://resources.download.minecraft.net/{h[:2]}/{h}", dest, h)
+        paths.append(dest)
+        log(f"語系檔 {name} -> {dest}")
+    return paths
 
 
 def newest_jdk():
@@ -125,6 +151,9 @@ def main():
     ap.add_argument("version", nargs="?", help="Minecraft 版本, 例如 1.26.2")
     ap.add_argument("--jar", help="使用本機 server jar (vanilla/Paper/Canvas bundler 皆可)")
     ap.add_argument("-o", "--out", help="輸出目錄 (預設 output/<版本>)")
+    ap.add_argument("--lang", default="zh_tw",
+                    help="翻譯語言 (預設 zh_tw, 例如 en_us/zh_cn/ja_jp; 從官方 asset index 取得)")
+    ap.add_argument("--no-lang", action="store_true", help="不包含翻譯欄位")
     ap.add_argument("--keep", action="store_true", help="保留 build 暫存檔")
     ap.add_argument("--list", action="store_true", help="列出 Mojang manifest 可用版本")
     args = ap.parse_args()
@@ -187,10 +216,28 @@ def main():
 
     classpath = str(runtime) + ":" + ":".join(map(str, libs))
 
+    # ---- 翻譯語系檔 (從官方 asset index) ----
+    lang_args = []
+    if not args.no_lang:
+        vid = None
+        try:
+            with zipfile.ZipFile(runtime) as z:
+                if "version.json" in z.namelist():
+                    vid = json.loads(z.read("version.json"))["id"]
+        except Exception:
+            pass
+        if not vid:
+            log("警告: 無法從 runtime jar 讀出版本 id, 跳過翻譯 (可用 --no-lang)")
+        else:
+            try:
+                lang_args = fetch_lang(vid, args.lang)
+            except Exception as e:
+                log(f"警告: 取得翻譯失敗 ({e}), 跳過")
+
     # ---- 編譯 + 執行 dump ----
     compile_dump(javac, "DumpCreativeTabs.java", classpath, build_dir / "classes")
     r = run([java, "-Xmx3G", "-cp", str(build_dir / "classes") + ":" + classpath,
-             "DumpCreativeTabs", str(out_dir)])
+             "DumpCreativeTabs", str(out_dir)] + lang_args)
     if r.returncode != 0:
         sys.stderr.write(r.stdout[-3000:] + r.stderr[-3000:])
         raise SystemExit("dump 執行失敗 (詳見 " + str(build_dir / "dump-debug.txt") + ")")

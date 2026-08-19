@@ -24,11 +24,14 @@ import net.minecraft.world.item.ItemStack;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Dumps the vanilla creative-mode tab layout and the full item registry for the
@@ -38,16 +41,42 @@ import java.util.List;
  *   bootstrap -> vanilla datapack -> tag loading -> worldgen registries ->
  *   data components -> CreativeModeTabs.tryRebuildTabContents
  *
- * Usage: java -cp "<runtime-server.jar>:<libraries>/*" DumpCreativeTabs [outputDir]
+ * Usage: java -cp "<runtime-server.jar>:<libraries>/*" DumpCreativeTabs [outputDir] [lang.json] [en_us.json]
  * Writes items.json + creative-tabs.json (pretty-printed) into outputDir (default ".").
+ * Optional lang files add name_<lang> / display_name_<lang> translation fields.
  */
 public class DumpCreativeTabs {
     static PrintWriter dbg;
+
+    static Map<String, String> loadLang(String path) {
+        Map<String, String> m = new HashMap<>();
+        if (path == null) return m;
+        try {
+            JsonObject o = JsonParser.parseString(Files.readString(Path.of(path))).getAsJsonObject();
+            for (Map.Entry<String, com.google.gson.JsonElement> e : o.entrySet()) {
+                m.put(e.getKey(), e.getValue().getAsString());
+            }
+            dbg.println("lang loaded: " + path + " (" + m.size() + " keys)");
+        } catch (Throwable t) {
+            dbg.println("lang load fail " + path + ": " + t);
+        }
+        return m;
+    }
 
     public static void main(String[] args) throws Exception {
         Path outDir = Path.of(args.length > 0 ? args[0] : ".");
         Files.createDirectories(outDir);
         dbg = new PrintWriter(Files.newBufferedWriter(outDir.resolve("dump-debug.txt")));
+        String langFile = args.length > 1 ? args[1] : null;
+        String enFile = args.length > 2 ? args[2] : null;
+        String langTag = langFile != null
+                ? Path.of(langFile).getFileName().toString().replace(".json", "") : "";
+        Map<String, String> lang = loadLang(langFile);
+        Map<String, String> en = loadLang(enFile);
+        java.util.function.Function<String, String> tr = k -> {
+            String v = lang.get(k);
+            return v != null ? v : en.get(k);
+        };
         try {
             dbg.println("step0: start");
             SharedConstants.tryDetectVersion();
@@ -123,8 +152,10 @@ public class DumpCreativeTabs {
                 o.addProperty("protocol_id", BuiltInRegistries.ITEM.getId(item));
                 boolean isBlock = BuiltInRegistries.BLOCK.containsKey(id);
                 o.addProperty("is_block", isBlock);
-                o.addProperty("translation_key",
-                        (isBlock ? "block.minecraft." : "item.minecraft.") + id.getPath());
+                String translationKey = (isBlock ? "block.minecraft." : "item.minecraft.") + id.getPath();
+                o.addProperty("translation_key", translationKey);
+                String localized = tr.apply(translationKey);
+                if (localized != null && !langTag.isEmpty()) o.addProperty("name_" + langTag, localized);
                 DataComponentMap comps;
                 try {
                     comps = item.components();
@@ -151,6 +182,18 @@ public class DumpCreativeTabs {
                 JsonObject o = new JsonObject();
                 o.addProperty("id", BuiltInRegistries.CREATIVE_MODE_TAB.getKey(tab).toString());
                 o.addProperty("display_name", tab.getDisplayName().getString());
+                String tabKey = null;
+                try {
+                    net.minecraft.network.chat.Component c = tab.getDisplayName();
+                    if (c.getContents() instanceof net.minecraft.network.chat.contents.TranslatableContents tc) {
+                        tabKey = tc.getKey();
+                    }
+                } catch (Throwable t) {
+                    // non-translatable display name
+                }
+                String tabLocalized = tabKey != null ? tr.apply(tabKey) : null;
+                if (tabLocalized != null && !langTag.isEmpty())
+                    o.addProperty("display_name_" + langTag, tabLocalized);
                 o.addProperty("type", tab.getType().name());
                 try {
                     o.addProperty("icon", BuiltInRegistries.ITEM.getKey(tab.getIconItem().getItem()).toString());
