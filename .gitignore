@@ -1,0 +1,10 @@
+# build 產物 / 快取
+build/
+output/
+classes/
+*.class
+*.jar
+__pycache__/
+*.pyc
+.cache/
+logs/
