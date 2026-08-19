@@ -49,6 +49,24 @@ python3 extract.py --list
 > 翻譯預設為繁體中文（`name_zh_tw`），可換成任一台版官方語系（`--lang`）。
 > 翻譯來源為官方 asset index 的 `minecraft/lang/<lang>.json`，與遊戲內顯示完全一致。
 
+### 官方圖示（`icon` / `source`）
+
+每個物品多出 `icon` 指到位於 `img/` 的**官方紋理 PNG**（從 Mojang 官方 client.jar 原封抽出，
+16×16，與遊戲內同一張圖），並附 `source` = 官方 client.jar URL（來源證明）。
+
+```json
+"icon": "img/item/diamond_sword.png",
+"source": "https://piston-data.mojang.com/v1/objects/.../client.jar"
+```
+
+- 紋理路徑**照遊戲自己的 item/block model** 解析（如 `oak_slab` → `block/oak_planks`、`melon` → `block/melon_top`）
+- 1.26.2 起紋理全部打包在 client.jar 內、官方 CDN 已無逐張 URL → 用本地抽出檔 + jar 來源
+- 舊版（紋理仍在 asset index / CDN）時會直接給出逐張 `icon_url`
+- 覆蓋率：1.26.2 = **1420/1537 (92.4%)**。剩餘多為合成/覆蓋層物品（彩色床、旗幟、
+  玩家頭顱、動畫時鐘等，無單一靜態紋理）
+
+> 提示：16×16 原圖要放大到 32/48 可用 nearest-neighbor 縮放（像素風一格一像素）。
+
 ### creative-tabs.json — 原版創造模式（1.26.2 共 14 個 tab）
 
 ```json
@@ -92,3 +110,5 @@ python3 extract.py --list
 |---|---|
 | `extract.py` | 主程式（版本次數化 CLI） |
 | `DumpCreativeTabs.java` | 遊戲核心內執行抽取的 Java 程式 |
+| `output/<版本>/img/` | 從官方 client jar 抽出的全部物品/方塊紋理 PNG（`item/`、`block/`） |
+| `output/<版本>/models/` | 官方 item/block model JSON（供解析每個物品實際紋理） |

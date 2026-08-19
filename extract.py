@@ -71,29 +71,71 @@ def resolve_version(version):
     raise SystemExit(f"版本 {version} 不在 Mojang manifest 中 (最新 release: {latest}; 可用 --list 查看)")
 
 
-def fetch_lang(vid, lang):
-    """從官方 asset index 取得語系檔 (+ en_us 備援), 回傳 [langPath, enPath]。"""
+def fetch_assets(vid, lang, img_dir):
+    """官方來源: 下載並快取 asset index (語系) + client jar (紋理)。
+    回傳 [langPath, enPath, indexJsonPath或None, clientJarUrl或""]。"""
     vmeta = http_json(resolve_version(vid)["url"])
-    ai = vmeta.get("assetIndex")
-    if not ai or "url" not in ai:
-        log("警告: 版本沒有 assetIndex, 跳過翻譯")
-        return []
-    idx = http_json(ai["url"])
-    out_dir = CACHE_DIR / vid / "lang"
-    out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
-    for name in (f"minecraft/lang/{lang}.json", "minecraft/lang/en_us.json"):
-        obj = idx.get("objects", {}).get(name)
-        if not obj:
-            log(f"警告: asset index 內沒有 {name}")
-            continue
-        h = obj["hash"]
-        dest = out_dir / name.rsplit("/", 1)[-1]
-        if not dest.exists():
-            download(f"https://resources.download.minecraft.net/{h[:2]}/{h}", dest, h)
-        paths.append(dest)
-        log(f"語系檔 {name} -> {dest}")
-    return paths
+    index_path = None
+    ai = vmeta.get("assetIndex")
+    if ai and "url" in ai:
+        index_path = CACHE_DIR / vid / "assets-index.json"
+        if not index_path.exists():
+            download(ai["url"], index_path, ai.get("sha1"))
+        else:
+            log(f"使用快取 asset index {index_path}")
+        with open(index_path, encoding="utf-8") as f:
+            idx = json.load(f)
+        out_dir = CACHE_DIR / vid / "lang"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for name in (f"minecraft/lang/{lang}.json", "minecraft/lang/en_us.json"):
+            obj = idx.get("objects", {}).get(name)
+            if not obj:
+                log(f"警告: asset index 內沒有 {name}")
+                continue
+            h = obj["hash"]
+            dest = out_dir / name.rsplit("/", 1)[-1]
+            if not dest.exists():
+                download(f"https://resources.download.minecraft.net/{h[:2]}/{h}", dest, h)
+            paths.append(dest)
+            log(f"語系檔 {name} -> {dest}")
+
+    client = vmeta.get("downloads", {}).get("client")
+    client_url = client["url"] if client else ""
+    if client_url and img_dir:
+        cjar = CACHE_DIR / vid / "client.jar"
+        if not cjar.exists():
+            download(client_url, cjar, client.get("sha1"))
+        else:
+            log(f"使用快取 client jar {cjar}")
+        n = 0
+        with zipfile.ZipFile(cjar) as z:
+            for entry in z.namelist():
+                if not entry.endswith(".png"):
+                    continue
+                if "/textures/item/" not in entry and "/textures/block/" not in entry:
+                    continue
+                rel = "item/" + entry.rsplit("/textures/item/", 1)[-1] if "/textures/item/" in entry \
+                    else "block/" + entry.rsplit("/textures/block/", 1)[-1]
+                dest = img_dir / rel
+                if not dest.exists():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(z.read(entry))
+                    n += 1
+        # 官方 item/block 模型 (解析每個物品實際使用的紋理路徑)
+        mn = 0
+        models_dir = img_dir.parent / "models"
+        with zipfile.ZipFile(cjar) as z:
+            for entry in z.namelist():
+                if entry.startswith("assets/minecraft/models/") and entry.endswith(".json"):
+                    rel = entry.removeprefix("assets/minecraft/models/")
+                    dest = models_dir / rel
+                    if not dest.exists():
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(z.read(entry))
+                        mn += 1
+        log(f"抽出官方紋理 PNG {n} 張 -> {img_dir}, 模型 JSON {mn} 個 -> {models_dir}")
+    return paths, index_path, client_url
 
 
 def newest_jdk():
@@ -216,8 +258,10 @@ def main():
 
     classpath = str(runtime) + ":" + ":".join(map(str, libs))
 
-    # ---- 翻譯語系檔 (從官方 asset index) ----
+    # ---- 翻譯語系檔 + 官方紋理 (client jar) ----
     lang_args = []
+    index_arg = []
+    client_url_arg = []
     if not args.no_lang:
         vid = None
         try:
@@ -227,17 +271,27 @@ def main():
         except Exception:
             pass
         if not vid:
-            log("警告: 無法從 runtime jar 讀出版本 id, 跳過翻譯 (可用 --no-lang)")
+            log("警告: 無法從 runtime jar 讀出版本 id, 跳過翻譯/圖片 (可用 --no-lang)")
         else:
             try:
-                lang_args = fetch_lang(vid, args.lang)
+                lang_args, index_path, client_url = fetch_assets(vid, args.lang, out_dir / "img")
+                if index_path:
+                    index_arg = [str(index_path)]
+                if client_url:
+                    client_url_arg = [client_url]
             except Exception as e:
-                log(f"警告: 取得翻譯失敗 ({e}), 跳過")
+                log(f"警告: 取得翻譯/圖片資源失敗 ({e}), 跳過")
 
     # ---- 編譯 + 執行 dump ----
     compile_dump(javac, "DumpCreativeTabs.java", classpath, build_dir / "classes")
-    r = run([java, "-Xmx3G", "-cp", str(build_dir / "classes") + ":" + classpath,
-             "DumpCreativeTabs", str(out_dir)] + lang_args)
+    # 固定三個槽位: [lang] [en] [assets-index] — 缺的留空, 避免位置錯位
+    java_run = [java, "-Xmx3G", "-cp", str(build_dir / "classes") + ":" + classpath,
+                "DumpCreativeTabs", str(out_dir),
+                lang_args[0] if lang_args else "",
+                lang_args[1] if len(lang_args) > 1 else "",
+                index_arg[0] if index_arg else "",
+                client_url_arg[0] if client_url_arg else ""]
+    r = run(java_run)
     if r.returncode != 0:
         sys.stderr.write(r.stdout[-3000:] + r.stderr[-3000:])
         raise SystemExit("dump 執行失敗 (詳見 " + str(build_dir / "dump-debug.txt") + ")")

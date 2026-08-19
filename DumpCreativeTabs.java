@@ -41,16 +41,109 @@ import java.util.Map;
  *   bootstrap -> vanilla datapack -> tag loading -> worldgen registries ->
  *   data components -> CreativeModeTabs.tryRebuildTabContents
  *
- * Usage: java -cp "<runtime-server.jar>:<libraries>/*" DumpCreativeTabs [outputDir] [lang.json] [en_us.json]
+ * Usage: java -cp "<runtime-server.jar>:<libraries>/*" DumpCreativeTabs [outputDir] [lang.json] [en_us.json] [assets-index.json]
  * Writes items.json + creative-tabs.json (pretty-printed) into outputDir (default ".").
  * Optional lang files add name_<lang> / display_name_<lang> translation fields.
+ * Optional Mojang assets-index.json adds official CDN icon_url fields.
  */
 public class DumpCreativeTabs {
     static PrintWriter dbg;
+    static final String RES_CDN = "https://resources.download.minecraft.net/";
+
+    static Map<String, String> loadAssetIndex(String path) {
+        Map<String, String> m = new HashMap<>();
+        if (!nonEmpty(path)) return m;
+        try {
+            JsonObject idx = JsonParser.parseString(Files.readString(Path.of(path))).getAsJsonObject();
+            JsonObject objs = idx.getAsJsonObject("objects");
+            for (Map.Entry<String, com.google.gson.JsonElement> e : objs.entrySet()) {
+                m.put(e.getKey(), e.getValue().getAsJsonObject().get("hash").getAsString());
+            }
+            dbg.println("asset index loaded: " + path + " (" + m.size() + " objects)");
+        } catch (Throwable t) {
+            dbg.println("asset index load fail " + path + ": " + t);
+        }
+        return m;
+    }
+
+    static String iconUrl(Map<String, String> assets, String texturePath) {
+        if (texturePath == null) return null;
+        String h = assets.get(texturePath);
+        return h != null ? RES_CDN + h.substring(0, 2) + "/" + h : null;
+    }
+
+    /** 找本地已抽出的紋理 (out/img/{item|block}/<name>.png), 回傳相對資料夾名 (item/block) 或 null。 */
+    static String findLocalIcon(Path outDir, String name, boolean blockFirst) {
+        String[] folders = blockFirst ? new String[]{"block", "item"} : new String[]{"item", "block"};
+        for (String f : folders) {
+            if (Files.exists(outDir.resolve("img").resolve(f).resolve(name + ".png"))) {
+                return f;
+            }
+        }
+        return null;
+    }
+
+    /** 照官方 item/block model 解析物品實際使用的紋理路徑 (如 "item/diamond_sword" / "block/melon_side")。 */
+    static String modelTexture(Path outDir, String itemName) {
+        String r = walkModel(outDir, "item/" + itemName);
+        if (r != null) return r;
+        return walkModel(outDir, "block/" + itemName); // 方塊物品常沒有專屬 item model
+    }
+
+    static String walkModel(Path outDir, String start) {
+        java.util.LinkedHashMap<String, String> textures = new java.util.LinkedHashMap<>();
+        String cur = start;
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        while (true) {
+            Path p = outDir.resolve("models").resolve(cur + ".json");
+            if (!Files.exists(p)) break;
+            String parent = null;
+            try {
+                JsonObject m = JsonParser.parseString(Files.readString(p)).getAsJsonObject();
+                if (m.has("textures")) {
+                    for (java.util.Map.Entry<String, com.google.gson.JsonElement> e
+                            : m.getAsJsonObject("textures").entrySet()) {
+                        if (!textures.containsKey(e.getKey())) {
+                            textures.put(e.getKey(), e.getValue().getAsString());
+                        }
+                    }
+                }
+                if (m.has("parent")) {
+                    String rawParent = m.get("parent").getAsString(); // may be "minecraft:block/x"
+                    int ci = rawParent.indexOf(':');
+                    parent = ci >= 0 ? rawParent.substring(ci + 1) : rawParent;
+                }
+            } catch (Throwable t) {
+                break;
+            }
+            if (parent == null || (!parent.startsWith("item/") && !parent.startsWith("block/"))) break;
+            if (!seen.add(parent)) break;
+            cur = parent;
+        }
+        String picked = null;
+        for (String key : new String[]{"layer0", "particle"}) {
+            String v = textures.get(key);
+            if (v != null && !v.isEmpty() && !v.startsWith("#")) { picked = v; break; }
+        }
+        if (picked == null) {
+            for (String v : textures.values()) {
+                if (v != null && !v.isEmpty() && !v.startsWith("#")) { picked = v; break; }
+            }
+        }
+        if (picked == null) return null;
+        int ci = picked.indexOf(':');
+        String norm = ci >= 0 ? picked.substring(ci + 1) : picked; // 剝 namespace
+        if (norm.indexOf('/') < 0) norm = "block/" + norm;          // 裸名 -> block/
+        return norm;
+    }
+
+    static boolean nonEmpty(String s) {
+        return s != null && !s.isEmpty();
+    }
 
     static Map<String, String> loadLang(String path) {
         Map<String, String> m = new HashMap<>();
-        if (path == null) return m;
+        if (!nonEmpty(path)) return m;
         try {
             JsonObject o = JsonParser.parseString(Files.readString(Path.of(path))).getAsJsonObject();
             for (Map.Entry<String, com.google.gson.JsonElement> e : o.entrySet()) {
@@ -69,10 +162,13 @@ public class DumpCreativeTabs {
         dbg = new PrintWriter(Files.newBufferedWriter(outDir.resolve("dump-debug.txt")));
         String langFile = args.length > 1 ? args[1] : null;
         String enFile = args.length > 2 ? args[2] : null;
-        String langTag = langFile != null
+        String indexFile = args.length > 3 ? args[3] : null;
+        String clientJarUrl = args.length > 4 ? args[4] : null;
+        String langTag = nonEmpty(langFile)
                 ? Path.of(langFile).getFileName().toString().replace(".json", "") : "";
         Map<String, String> lang = loadLang(langFile);
         Map<String, String> en = loadLang(enFile);
+        Map<String, String> assets = loadAssetIndex(indexFile);
         java.util.function.Function<String, String> tr = k -> {
             String v = lang.get(k);
             return v != null ? v : en.get(k);
@@ -156,6 +252,40 @@ public class DumpCreativeTabs {
                 o.addProperty("translation_key", translationKey);
                 String localized = tr.apply(translationKey);
                 if (localized != null && !langTag.isEmpty()) o.addProperty("name_" + langTag, localized);
+                // 官方圖示: 依遊戲 item model 解析紋理路徑 → 本地抽出檔 (icon) + 來源 URL (icon_url)
+                String texRoot = modelTexture(outDir, id.getPath());
+                String imgFolder = null;
+                String pngRel = null;
+                if (texRoot != null && texRoot.indexOf('/') > 0) {
+                    String folder = texRoot.substring(0, texRoot.indexOf('/'));
+                    String texName = texRoot.substring(texRoot.indexOf('/') + 1);
+                    if (Files.exists(outDir.resolve("img").resolve(folder).resolve(texName + ".png"))) {
+                        imgFolder = folder;
+                        pngRel = texName;
+                    }
+                }
+                if (imgFolder == null) { // fallback: 直接同名 (+ waxed_ 剝除)
+                    String f2 = findLocalIcon(outDir, id.getPath(), isBlock);
+                    if (f2 == null && id.getPath().startsWith("waxed_")) {
+                        f2 = findLocalIcon(outDir, id.getPath().substring(6), true);
+                    }
+                    if (f2 != null) {
+                        imgFolder = f2;
+                        pngRel = id.getPath().startsWith("waxed_")
+                                && !Files.exists(outDir.resolve("img").resolve(f2)
+                                        .resolve(id.getPath() + ".png"))
+                                ? id.getPath().substring(6) : id.getPath();
+                    }
+                }
+                if (imgFolder != null) {
+                    o.addProperty("icon", "img/" + imgFolder + "/" + pngRel + ".png");
+                    // icon_url: 僅在真的有逐張官方 CDN URL (舊版 asset index) 時給出
+                    String u = iconUrl(assets,
+                            "minecraft/textures/" + imgFolder + "/" + pngRel + ".png");
+                    if (u != null) o.addProperty("icon_url", u);
+                    // source: 官方 client jar URL (最新版紋理全部打包在 jar 內, CDN 無逐張圖) — 來源證明
+                    if (nonEmpty(clientJarUrl)) o.addProperty("source", clientJarUrl);
+                }
                 DataComponentMap comps;
                 try {
                     comps = item.components();
